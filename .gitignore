@@ -2,4 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 .env
+*.egg-info/
 qbo_tokens.json
+tokens/*.json
