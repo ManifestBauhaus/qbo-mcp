@@ -30,6 +30,11 @@ PLAYGROUND_REDIRECT = "https://developer.intuit.com/v2/OAuth2Playground/Redirect
 def main():
     parser = argparse.ArgumentParser(description="Fetch QBO OAuth tokens")
     parser.add_argument("--token-file", required=True, help="Path to save tokens (e.g. tokens/ecre.json)")
+    parser.add_argument(
+        "--push-to-gcp",
+        action="store_true",
+        help="Upload local token file to GCP Secret Manager",
+    )
     args = parser.parse_args()
 
     # Load .env
@@ -114,6 +119,16 @@ def main():
 
     with open(token_file, "w") as f:
         json.dump(tokens, f, indent=2)
+
+    if args.push_to_gcp:
+        from qbo_mcp.token_backends import GCPTokenBackend
+        project_id = os.getenv("GCP_PROJECT_ID", "gen-lang-client-0253282755")
+        book_name = token_file.stem
+        secret_id = f"qbo-tokens-{book_name}"
+        print(f"\nPushing to GCP Secret Manager: {secret_id}")
+        backend = GCPTokenBackend(project_id=project_id, secret_id=secret_id)
+        backend.save(tokens)
+        print(f"Uploaded to GCP secret: {secret_id}")
 
     print(f"\nSUCCESS! Tokens saved to {token_file}")
     print(f"  Realm ID:          {realm_id}")

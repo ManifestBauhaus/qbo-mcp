@@ -14,6 +14,7 @@ dependencies = [
     "mcp[cli]>=1.6.0",
     "python-dotenv>=1.1.0",
     "python-quickbooks>=0.9.12",
+    "google-cloud-secret-manager>=2.20.0",
 ]
 
 [project.optional-dependencies]

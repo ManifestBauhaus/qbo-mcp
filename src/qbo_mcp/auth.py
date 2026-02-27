@@ -14,6 +14,7 @@ from qbo_mcp.auth_logger import AuthEventLogger
 from qbo_mcp.config import QBOConfig, config
 from qbo_mcp.oauth_flow import run_interactive_oauth
 from qbo_mcp.readonly_guard import apply_readonly_guard
+from qbo_mcp.token_backends import get_token_backend, LocalTokenBackend
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -50,24 +51,33 @@ class QBOService:
 
     def _load_tokens(self) -> None:
         """
-        Load tokens from disk or environment variables and set them on the AuthClient.
+        Load tokens using the configured backend, with fallback chain.
 
-        Tries to load from the configured token file first. If not found, falls back to environment variables.
-        If both fail, assumes authentication has not been run and initiates a new auth session.
+        Order: configured backend (gcp or local) -> local file fallback (if gcp failed)
+        -> environment variables -> interactive OAuth.
         """
         tokens = {}
-        # 1. Try loading from token file
-        try:
-            with open(self.token_file, 'r') as f:
-                tokens = json.load(f)
-            logger.info(f"Loaded tokens from {self.token_file}")
-        except FileNotFoundError:
-            logger.warning(f"Token file not found at {self.token_file}")
-        except Exception as e:
-            logger.warning(f"Error reading token file: {str(e)}")
 
-        # 2. If file failed, try environment
-        if not tokens.get('access_token'):
+        # 1. Try configured backend (gcp or local)
+        try:
+            self._token_backend = get_token_backend(
+                self.config.token_backend,
+                token_file=self.token_file,
+                project_id=self.config.gcp_project_id,
+                secret_id=self.config.gcp_secret_id,
+            )
+            tokens = self._token_backend.load()
+        except Exception as e:
+            logger.warning(f"Token backend ({self.config.token_backend}) error: {e}")
+
+        # 2. Fallback: if GCP failed, try local file
+        if not tokens.get("access_token") and self.config.token_backend == "gcp":
+            logger.warning("GCP backend failed, falling back to local file")
+            fallback = LocalTokenBackend(self.token_file)
+            tokens = fallback.load()
+
+        # 3. Fallback: try environment variables
+        if not tokens.get("access_token"):
             env_tokens = {
                 "access_token": os.getenv("QBO_ACCESS_TOKEN"),
                 "refresh_token": os.getenv("QBO_REFRESH_TOKEN"),
@@ -75,45 +85,39 @@ class QBOService:
                 "realm_id": os.getenv("QBO_REALM_ID"),
             }
             env_tokens = {k: v for k, v in env_tokens.items() if v is not None}
-            if env_tokens.get('access_token'):
+            if env_tokens.get("access_token"):
                 tokens = env_tokens
                 logger.info("Loaded tokens from environment variables.")
-            else:
-                logger.warning("No tokens found in environment variables.")
 
-        # 3. If neither file nor env provided tokens, start new auth session
-        if not tokens.get('access_token'):
-            logger.warning("No tokens found in file or environment. Starting new authentication session.")
+        # 4. Last resort: interactive OAuth
+        if not tokens.get("access_token"):
+            logger.warning("No tokens found. Starting new authentication session.")
             tokens = run_interactive_oauth(self.auth_client, self.config.scopes)
             self._save_tokens(tokens)
-            logger.info("Successfully obtained and saved tokens from initial OAuth flow.")
 
         # Set tokens on auth_client
-        self.auth_client.access_token = tokens.get('access_token')
-        self.auth_client.refresh_token = tokens.get('refresh_token')
-        self.auth_client.environment = tokens.get('environment', 'sandbox')
-        self.auth_client.realm_id = tokens.get('realm_id')
+        self.auth_client.access_token = tokens.get("access_token")
+        self.auth_client.refresh_token = tokens.get("refresh_token")
+        self.auth_client.environment = tokens.get("environment", "sandbox")
+        self.auth_client.realm_id = tokens.get("realm_id")
 
     def _save_tokens(self, tokens=None) -> None:
         """
-        Persist the current AuthClient tokens to disk.
+        Persist tokens using the configured backend.
 
-        Saves the access token, refresh token, environment, and realm_id to the configured token file.
+        Saves the access token, refresh token, environment, and realm_id via the token backend.
         """
         try:
             if tokens is None:
                 tokens = {
-                    'access_token': self.auth_client.access_token,
-                    'refresh_token': self.auth_client.refresh_token,
-                    'environment': self.auth_client.environment,
-                    'realm_id': self.auth_client.realm_id,
+                    "access_token": self.auth_client.access_token,
+                    "refresh_token": self.auth_client.refresh_token,
+                    "environment": self.auth_client.environment,
+                    "realm_id": self.auth_client.realm_id,
                 }
-            self.token_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.token_file, 'w') as f:
-                json.dump(tokens, f, indent=2)
-            logger.info(f"💾  Saved tokens to {self.token_file}")
+            self._token_backend.save(tokens)
         except Exception as e:
-            logger.error(f"Error saving tokens: {str(e)}")
+            logger.error(f"Error saving tokens: {e}")
 
     def ensure_authenticated(self) -> bool:
         """
