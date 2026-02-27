@@ -58,6 +58,9 @@ class QBOService:
         """
         tokens = {}
 
+        # Default backend — ensures _token_backend is always set
+        self._token_backend = LocalTokenBackend(self.token_file)
+
         # 1. Try configured backend (gcp or local)
         try:
             self._token_backend = get_token_backend(
@@ -193,8 +196,7 @@ class QBOService:
         try:
             if self.auth_client.refresh_token:
                 self.auth_client.revoke()
-                if self.token_file.exists():
-                    self.token_file.unlink()
+                self._token_backend.delete()
                 # Clear in-memory tokens
                 self.auth_client.access_token = None
                 self.auth_client.refresh_token = None

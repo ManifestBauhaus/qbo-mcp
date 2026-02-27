@@ -25,6 +25,11 @@ class TokenBackend(ABC):
         """Persist tokens."""
         ...
 
+    @abstractmethod
+    def delete(self) -> None:
+        """Remove stored tokens."""
+        ...
+
 
 class LocalTokenBackend(TokenBackend):
     """Store tokens as a local JSON file."""
@@ -51,6 +56,11 @@ class LocalTokenBackend(TokenBackend):
         with open(self.token_file, "w") as f:
             json.dump(tokens, f, indent=2)
         logger.info(f"Saved tokens to {self.token_file}")
+
+    def delete(self) -> None:
+        if self.token_file.exists():
+            self.token_file.unlink()
+            logger.info(f"Deleted token file {self.token_file}")
 
 
 class GCPTokenBackend(TokenBackend):
@@ -82,6 +92,7 @@ class GCPTokenBackend(TokenBackend):
             return {}
 
     def save(self, tokens: dict[str, Any]) -> None:
+        from google.api_core.exceptions import NotFound
         payload = json.dumps(tokens, indent=2).encode("utf-8")
         try:
             self._client.add_secret_version(
@@ -91,26 +102,33 @@ class GCPTokenBackend(TokenBackend):
                 }
             )
             logger.info(f"Saved tokens to GCP secret {self._secret_id}")
+        except NotFound:
+            self._client.create_secret(
+                request={
+                    "parent": f"projects/{self._project_id}",
+                    "secret_id": self._secret_id,
+                    "secret": {"replication": {"automatic": {}}},
+                }
+            )
+            self._client.add_secret_version(
+                request={
+                    "parent": self._secret_path,
+                    "payload": {"data": payload},
+                }
+            )
+            logger.info(f"Created and saved GCP secret {self._secret_id}")
+
+    def delete(self) -> None:
+        from google.api_core.exceptions import NotFound
+        try:
+            # Disable the latest version rather than destroying the secret
+            name = f"{self._secret_path}/versions/latest"
+            self._client.disable_secret_version(request={"name": name})
+            logger.info(f"Disabled GCP secret version {self._secret_id}")
+        except NotFound:
+            logger.info(f"GCP secret {self._secret_id} not found, nothing to delete")
         except Exception as e:
-            from google.api_core.exceptions import NotFound
-            if isinstance(e, NotFound):
-                self._client.create_secret(
-                    request={
-                        "parent": f"projects/{self._project_id}",
-                        "secret_id": self._secret_id,
-                        "secret": {"replication": {"automatic": {}}},
-                    }
-                )
-                self._client.add_secret_version(
-                    request={
-                        "parent": self._secret_path,
-                        "payload": {"data": payload},
-                    }
-                )
-                logger.info(f"Created and saved GCP secret {self._secret_id}")
-            else:
-                logger.error(f"Error saving to GCP: {e}")
-                raise
+            logger.warning(f"Error disabling GCP secret: {e}")
 
 
 def get_token_backend(
