@@ -68,7 +68,10 @@ class AuthEventLogger:
             "%s | REFRESH_FAILURE | %s | %s | %s", ts, book_name, realm_id, error
         )
         self._send_chat_alert(
-            f"QBO token refresh FAILED for *{book_name}* (realm {realm_id}): {error}"
+            f"*QBO Token Refresh Failed* for *{book_name.upper()}* "
+            f"(Realm {realm_id}).\n"
+            f"Error: {error}\n"
+            f"Run: `uv run python scripts/get_tokens.py --token-file tokens/{book_name}.json`"
         )
 
     def log_write_blocked(self, method_name: str, details: str = "") -> None:

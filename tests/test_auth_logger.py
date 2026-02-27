@@ -1,5 +1,6 @@
 """Tests for the auth event logger and Google Chat alert integration."""
 
+import json
 from unittest.mock import patch
 
 from qbo_mcp.auth_logger import AuthEventLogger
@@ -44,11 +45,20 @@ class TestAuthEventLogger:
         # Verify the request body contains expected fields
         call_args = mock_urlopen.call_args
         request = call_args[0][0]
-        import json
-
         body = json.loads(request.data.decode("utf-8"))
         assert "bmr" in body["text"]
         assert "123456" in body["text"]
+
+    @patch("qbo_mcp.auth_logger.urllib.request.urlopen", side_effect=Exception("connection timeout"))
+    def test_chat_alert_http_failure_does_not_crash(self, mock_urlopen, tmp_path):
+        logger = AuthEventLogger(
+            log_dir=tmp_path,
+            chat_webhook_url="https://chat.googleapis.com/v1/spaces/test/messages?key=abc",
+        )
+        logger.log_refresh_failure(
+            realm_id="123456", book_name="bmr", error="token expired"
+        )
+        # Should not raise — alert is best-effort
 
     def test_no_crash_without_webhook_url(self, tmp_path):
         logger = AuthEventLogger(log_dir=tmp_path)

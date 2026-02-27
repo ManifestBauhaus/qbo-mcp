@@ -47,7 +47,7 @@ def _make_blocked_method(
     return blocked
 
 
-def _make_readonly_make_request(original):
+def _make_readonly_make_request(original, auth_event_logger=None):
     """Return a wrapper around make_request that only allows GET requests.
 
     The QuickBooks client's get() and get_report() internally call
@@ -61,6 +61,8 @@ def _make_readonly_make_request(original):
                 "Blocked non-GET make_request('%s') on read-only QBO client.",
                 request_type,
             )
+            if auth_event_logger is not None:
+                auth_event_logger.log_write_blocked(f"make_request({request_type})")
             raise PermissionError(
                 f"QBO MCP is read-only. HTTP {request_type} is blocked."
             )
@@ -94,7 +96,7 @@ def apply_readonly_guard(
 
     if hasattr(client, "make_request"):
         original_make_request = client.make_request
-        client.make_request = _make_readonly_make_request(original_make_request)
+        client.make_request = _make_readonly_make_request(original_make_request, auth_event_logger)
 
     setattr(client, _GUARD_ATTR, True)
     logger.info(
