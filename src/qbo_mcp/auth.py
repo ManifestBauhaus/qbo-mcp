@@ -12,6 +12,7 @@ from quickbooks import QuickBooks
 
 from qbo_mcp.config import QBOConfig, config
 from qbo_mcp.oauth_flow import run_interactive_oauth
+from qbo_mcp.readonly_guard import apply_readonly_guard
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -155,6 +156,7 @@ class QBOService:
                 refresh_token=self.auth_client.refresh_token,
                 realm_id=self.auth_client.realm_id,
             )
+            apply_readonly_guard(self.qbo)
         except Exception as e:
             logger.error(f"QBO Service error: {str(e)}")
             raise ValueError(f"QBO Service error: {str(e)}")
