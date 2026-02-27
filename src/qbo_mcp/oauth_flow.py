@@ -1,16 +1,21 @@
 import logging
+import ssl
 import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 logger = logging.getLogger(__name__)
 
+CERTS_DIR = Path(__file__).resolve().parent.parent.parent / "certs"
+
 
 def run_interactive_oauth(auth_client, scopes):
     """
-    Run the interactive OAuth flow: start a local server, open browser, capture code/realmId, exchange for tokens.
+    Run the interactive OAuth flow: start a local HTTPS server, open browser,
+    capture code/realmId, exchange for tokens.
     Returns a dict: {access_token, refresh_token, environment, realm_id}
     """
     class OAuthHandler(BaseHTTPRequestHandler):
@@ -37,16 +42,37 @@ def run_interactive_oauth(auth_client, scopes):
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(b"<html><body><h1>Invalid request.</h1></body></html>")
+        def log_message(self, format, *args):
+            logger.debug(format % args)
 
     redirect_uri = auth_client.redirect_uri
     parsed_uri = urlparse(redirect_uri)
     host = parsed_uri.hostname or 'localhost'
-    port = parsed_uri.port or 8000
+    port = parsed_uri.port or 8001
+    use_https = parsed_uri.scheme == 'https'
+
     httpd = HTTPServer((host, port), OAuthHandler)
+
+    if use_https:
+        cert_file = CERTS_DIR / "localhost.crt"
+        key_file = CERTS_DIR / "localhost.key"
+        if not cert_file.exists() or not key_file.exists():
+            raise FileNotFoundError(
+                f"SSL certs not found at {CERTS_DIR}. "
+                "Run: openssl req -x509 -newkey rsa:2048 "
+                "-keyout certs/localhost.key -out certs/localhost.crt "
+                "-days 3650 -nodes -subj '/CN=localhost'"
+            )
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        logger.info(f"Started local OAuth 2.0 HTTPS server at https://{host}:{port}")
+    else:
+        logger.info(f"Started local OAuth 2.0 HTTP server at http://{host}:{port}")
+
     server_thread = threading.Thread(target=httpd.serve_forever)
     server_thread.daemon = True
     server_thread.start()
-    logger.info(f"Started local OAuth 2.0 server at http://{host}:{port}")
 
     try:
         auth_url = auth_client.get_authorization_url(scopes=scopes)
