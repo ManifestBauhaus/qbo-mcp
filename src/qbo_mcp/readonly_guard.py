@@ -5,7 +5,13 @@ HTTP methods. Always on, no toggle. This ensures the MCP server can never
 accidentally create, update, or delete QuickBooks objects.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from qbo_mcp.auth_logger import AuthEventLogger
 
 logger = logging.getLogger(__name__)
 
@@ -21,13 +27,18 @@ BLOCKED_METHODS = [
 _GUARD_ATTR = "_readonly_guard_applied"
 
 
-def _make_blocked_method(method_name: str):
+def _make_blocked_method(
+    method_name: str,
+    auth_event_logger: AuthEventLogger | None = None,
+):
     """Return a function that raises PermissionError when called."""
 
     def blocked(*args, **kwargs):
         logger.warning(
             "Blocked write operation '%s' on read-only QBO client.", method_name
         )
+        if auth_event_logger is not None:
+            auth_event_logger.log_write_blocked(method_name)
         raise PermissionError(
             f"QBO MCP is read-only. Write operation '{method_name}' is blocked. "
             "This server only supports read operations (get, get_report, query)."
@@ -58,20 +69,28 @@ def _make_readonly_make_request(original):
     return wrapper
 
 
-def apply_readonly_guard(client) -> None:
+def apply_readonly_guard(
+    client,
+    auth_event_logger: AuthEventLogger | None = None,
+) -> None:
     """Patch all write methods on the QuickBooks client to raise PermissionError.
 
     This is idempotent -- calling it multiple times on the same client is safe.
 
     Args:
         client: A python-quickbooks QuickBooks client instance.
+        auth_event_logger: Optional logger for recording blocked write attempts.
     """
     if getattr(client, _GUARD_ATTR, None) is True:
         logger.info("Read-only guard already applied, skipping.")
         return
 
     for method_name in BLOCKED_METHODS:
-        setattr(client, method_name, _make_blocked_method(method_name))
+        setattr(
+            client,
+            method_name,
+            _make_blocked_method(method_name, auth_event_logger),
+        )
 
     if hasattr(client, "make_request"):
         original_make_request = client.make_request

@@ -6,3 +6,4 @@ __pycache__/
 qbo_tokens.json
 tokens/*.json
 certs/*.key
+logs/

@@ -37,6 +37,8 @@ class QBOConfig():
         
         # Token storage
         self.token_file: Path = Path(os.getenv("QBO_TOKEN_FILE", "qbo_tokens.json")).resolve()
+        self.chat_webhook_url: str | None = os.getenv("GOOGLE_CHAT_WEBHOOK_URL")
+        self.book_name: str = self.token_file.stem
         if not self.token_file.exists():
             self.token_file.touch()
             logger.info(f"🪙  Created new token file at {self.token_file}")

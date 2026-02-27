@@ -10,6 +10,7 @@ from intuitlib.client import AuthClient
 from intuitlib.enums import Scopes
 from quickbooks import QuickBooks
 
+from qbo_mcp.auth_logger import AuthEventLogger
 from qbo_mcp.config import QBOConfig, config
 from qbo_mcp.oauth_flow import run_interactive_oauth
 from qbo_mcp.readonly_guard import apply_readonly_guard
@@ -41,6 +42,9 @@ class QBOService:
             environment=self.config.environment,
         )
         self._load_tokens()
+        self.auth_event_logger = AuthEventLogger(
+            chat_webhook_url=self.config.chat_webhook_url,
+        )
         self.qbo: QuickBooks
         logger.info("QBOService initialized!")
 
@@ -128,9 +132,18 @@ class QBOService:
         try:
             self.auth_client.refresh()
             self._save_tokens()
+            self.auth_event_logger.log_refresh_success(
+                realm_id=self.auth_client.realm_id or "unknown",
+                book_name=self.config.book_name,
+            )
             logger.info("Tokens refreshed successfully!")
             return True
         except Exception as e:
+            self.auth_event_logger.log_refresh_failure(
+                realm_id=self.auth_client.realm_id or "unknown",
+                book_name=self.config.book_name,
+                error=str(e),
+            )
             logger.error(f"Token refresh error: {str(e)}")
             return False
 
@@ -156,7 +169,7 @@ class QBOService:
                 refresh_token=self.auth_client.refresh_token,
                 realm_id=self.auth_client.realm_id,
             )
-            apply_readonly_guard(self.qbo)
+            apply_readonly_guard(self.qbo, self.auth_event_logger)
         except Exception as e:
             logger.error(f"QBO Service error: {str(e)}")
             raise ValueError(f"QBO Service error: {str(e)}")
