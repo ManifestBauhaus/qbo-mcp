@@ -1,6 +1,8 @@
 """Reports module for generating QuickBooks Online reports."""
 
 import logging
+import sys
+import traceback
 from datetime import datetime, date, timedelta
 from dataclasses import dataclass
 from typing import Any
@@ -236,11 +238,24 @@ class QBOReportsGenerator:
             raise
     
     def _process_profit_loss_report(self, report_data: dict[str, Any]) -> dict[str, Any]:
-        """Process raw P&L report data into structured format."""
+        """Process raw P&L report data into structured format.
+
+        QBO report structure:
+        - Rows: {"Row": [...]}
+        - Each top-level Row has: Header.ColData (section name), Rows.Row (line items),
+          Summary.ColData (section total), type ("Section"), group (string like "Income")
+        - Line items have ColData: [{"value": "account name"}, {"value": "amount"}, ...]
+        - Some rows are summary-only (e.g., "Gross Profit") with just Summary.ColData
+        """
         try:
             header = report_data.get("Header", {})
-            rows = report_data.get("Rows", [])
-            
+            # QBO returns Rows as {"Row": [...]} dict
+            rows_container = report_data.get("Rows", {})
+            if isinstance(rows_container, dict):
+                rows = rows_container.get("Row", [])
+            else:
+                rows = rows_container if isinstance(rows_container, list) else []
+
             processed = {
                 "report_name": header.get("ReportName", "Profit and Loss"),
                 "report_basis": header.get("ReportBasis", "Accrual"),
@@ -249,40 +264,118 @@ class QBOReportsGenerator:
                 "currency": header.get("Currency", "USD"),
                 "sections": {}
             }
-            
-            current_section = None
-            
+
             for row in rows:
-                if row.get("type") == "Section":
-                    section_data = row.get("group", [])
-                    if section_data:
-                        section_name = section_data[0].get("value", "Unknown Section")
-                        current_section = section_name
-                        processed["sections"][current_section] = {
-                            "items": [],
-                            "subtotal": 0
-                        }
-                
-                elif row.get("type") == "Data" and current_section:
-                    row_data = row.get("group", [])
-                    if len(row_data) >= 2:
-                        account_name = row_data[0].get("value", "")
-                        amount = self._parse_amount(row_data[1].get("value", "0"))
-                        
-                        processed["sections"][current_section]["items"].append({
-                            "account": account_name,
-                            "amount": amount
-                        })
-            
-            # Calculate subtotals
-            for section in processed["sections"].values():
-                section["subtotal"] = sum(item["amount"] for item in section["items"])
-            
+                if not isinstance(row, dict):
+                    continue
+
+                # Get section name from Header.ColData or group string
+                section_name = None
+                header_data = row.get("Header", {})
+                if isinstance(header_data, dict):
+                    col_data = header_data.get("ColData", [])
+                    if col_data and isinstance(col_data, list) and isinstance(col_data[0], dict):
+                        section_name = col_data[0].get("value", "")
+
+                # Fallback: use group string as section name
+                if not section_name:
+                    group_val = row.get("group", "")
+                    if isinstance(group_val, str) and group_val:
+                        section_name = group_val
+
+                # Summary-only rows (like "Gross Profit", "Net Income")
+                if not section_name:
+                    summary = row.get("Summary", {})
+                    if isinstance(summary, dict):
+                        sum_cols = summary.get("ColData", [])
+                        if sum_cols and isinstance(sum_cols, list) and isinstance(sum_cols[0], dict):
+                            section_name = sum_cols[0].get("value", "")
+
+                if not section_name:
+                    continue
+
+                section = {
+                    "items": [],
+                    "subtotal": 0.0
+                }
+
+                # Extract line items from nested Rows
+                self._extract_line_items(row, section["items"])
+
+                # Get subtotal from Summary if available
+                summary = row.get("Summary", {})
+                if isinstance(summary, dict):
+                    sum_cols = summary.get("ColData", [])
+                    if sum_cols and isinstance(sum_cols, list) and len(sum_cols) >= 2:
+                        # Last column is usually the total
+                        last_col = sum_cols[-1]
+                        if isinstance(last_col, dict):
+                            section["subtotal"] = self._parse_amount(last_col.get("value", "0"))
+
+                # If no subtotal from Summary, calculate from items
+                if section["subtotal"] == 0.0 and section["items"]:
+                    section["subtotal"] = sum(item["amount"] for item in section["items"])
+
+                processed["sections"][section_name] = section
+
             return processed
-            
+
         except Exception as e:
+            traceback.print_exc(file=sys.stderr)
             logger.error(f"Error processing P&L report: {str(e)}")
             return {"error": str(e), "raw_data": report_data}
+
+    def _extract_line_items(self, row: dict, items: list) -> None:
+        """Recursively extract line items from nested QBO report rows.
+
+        Handles arbitrarily nested Rows.Row structures, collecting leaf-level
+        ColData entries as line items.
+        """
+        # Check for nested Rows
+        nested_rows = row.get("Rows", {})
+        if isinstance(nested_rows, dict):
+            nested_list = nested_rows.get("Row", [])
+        elif isinstance(nested_rows, list):
+            nested_list = nested_rows
+        else:
+            nested_list = []
+
+        for sub_row in nested_list:
+            if not isinstance(sub_row, dict):
+                continue
+
+            # If this sub_row has further nested Rows, recurse
+            if "Rows" in sub_row:
+                self._extract_line_items(sub_row, items)
+                continue
+
+            # Leaf row — extract ColData
+            col_data = sub_row.get("ColData", [])
+            if not isinstance(col_data, list) or len(col_data) < 2:
+                continue
+
+            name_col = col_data[0]
+            amount_col = col_data[-1]  # Last column is typically the total/amount
+
+            account_name = ""
+            if isinstance(name_col, dict):
+                account_name = name_col.get("value", "")
+            elif isinstance(name_col, str):
+                account_name = name_col
+
+            amount_val = "0"
+            if isinstance(amount_col, dict):
+                amount_val = amount_col.get("value", "0")
+            elif isinstance(amount_col, str):
+                amount_val = amount_col
+
+            amount = self._parse_amount(amount_val)
+
+            if account_name and account_name.lower() not in ("total", "totals"):
+                items.append({
+                    "account": account_name,
+                    "amount": amount
+                })
     
     def _process_balance_sheet_report(self, report_data: dict[str, Any]) -> dict[str, Any]:
         """Process raw Balance Sheet report data."""
@@ -299,8 +392,13 @@ class QBOReportsGenerator:
             return {"error": "No report data provided", "report_type": report_type}
         try:
             header = report_data.get("Header", {})
-            rows = report_data.get("Rows", [])
-            
+            # QBO returns Rows as {"Row": [...]} dict, not a flat list
+            rows_container = report_data.get("Rows", {})
+            if isinstance(rows_container, dict):
+                rows = rows_container.get("Row", [])
+            else:
+                rows = rows_container
+
             processed = {
                 "report_name": header.get("ReportName", f"{report_type.title()} Aging"),
                 "as_of_date": header.get("EndPeriod"),
@@ -308,30 +406,66 @@ class QBOReportsGenerator:
                 "aging_buckets": [],
                 "customers_vendors": []
             }
-            
+
             for row in rows:
-                if row.get("type") == "Data":
-                    row_data = row.get("group", [])
-                    if len(row_data) >= 6:  # Typical aging report has 6+ columns
-                        entity_name = row_data[0].get("value", "")
-                        current = self._parse_amount(row_data[1].get("value", "0"))
-                        days_1_30 = self._parse_amount(row_data[2].get("value", "0"))
-                        days_31_60 = self._parse_amount(row_data[3].get("value", "0"))
-                        days_61_90 = self._parse_amount(row_data[4].get("value", "0"))
-                        over_90 = self._parse_amount(row_data[5].get("value", "0"))
-                        total = sum([current, days_1_30, days_31_60, days_61_90, over_90])
-                        
-                        processed["customers_vendors"].append({
-                            "name": entity_name,
-                            "current": current,
-                            "1_30_days": days_1_30,
-                            "31_60_days": days_31_60,
-                            "61_90_days": days_61_90,
-                            "over_90_days": over_90,
-                            "total": total
-                        })
+                # QBO aging reports can have nested structures:
+                # - Top-level rows may have "Rows" containing sub-rows (vendor/customer detail)
+                # - Or they may have direct "ColData" (summary rows like totals)
+                # - "Header" within a row group has the entity name + aging buckets
+                # We need to handle all these cases.
+
+                # Case 1: Row is a section/group with nested Rows (e.g., vendor with sub-items)
+                if "Rows" in row:
+                    # This is a grouped row — extract the header ColData for the entity
+                    header_data = row.get("Header", {})
+                    col_data = header_data.get("ColData", [])
+                    if col_data and len(col_data) >= 7:
+                        entity_name = col_data[0].get("value", "")
+                        if entity_name and entity_name.lower() not in ("total", "totals"):
+                            current = self._parse_amount(col_data[1].get("value", "0"))
+                            days_1_30 = self._parse_amount(col_data[2].get("value", "0"))
+                            days_31_60 = self._parse_amount(col_data[3].get("value", "0"))
+                            days_61_90 = self._parse_amount(col_data[4].get("value", "0"))
+                            over_90 = self._parse_amount(col_data[5].get("value", "0"))
+                            total = self._parse_amount(col_data[6].get("value", "0"))
+                            processed["customers_vendors"].append({
+                                "name": entity_name,
+                                "current": current,
+                                "1_30_days": days_1_30,
+                                "31_60_days": days_31_60,
+                                "61_90_days": days_61_90,
+                                "over_90_days": over_90,
+                                "total": total
+                            })
+                    continue
+
+                # Case 2: Row has direct ColData (flat row — simple vendor/customer line or summary)
+                col_data = row.get("ColData", row.get("group", []))
+                if not isinstance(col_data, list):
+                    continue
+                if len(col_data) >= 7:
+                    entity_name = col_data[0].get("value", "") if isinstance(col_data[0], dict) else str(col_data[0])
+                    if not entity_name or entity_name.lower() in ("total", "totals"):
+                        continue
+                    current = self._parse_amount(col_data[1].get("value", "0") if isinstance(col_data[1], dict) else col_data[1])
+                    days_1_30 = self._parse_amount(col_data[2].get("value", "0") if isinstance(col_data[2], dict) else col_data[2])
+                    days_31_60 = self._parse_amount(col_data[3].get("value", "0") if isinstance(col_data[3], dict) else col_data[3])
+                    days_61_90 = self._parse_amount(col_data[4].get("value", "0") if isinstance(col_data[4], dict) else col_data[4])
+                    over_90 = self._parse_amount(col_data[5].get("value", "0") if isinstance(col_data[5], dict) else col_data[5])
+                    total = self._parse_amount(col_data[6].get("value", "0") if isinstance(col_data[6], dict) else col_data[6])
+
+                    processed["customers_vendors"].append({
+                        "name": entity_name,
+                        "current": current,
+                        "1_30_days": days_1_30,
+                        "31_60_days": days_31_60,
+                        "61_90_days": days_61_90,
+                        "over_90_days": over_90,
+                        "total": total
+                    })
             return processed
         except Exception as e:
+            traceback.print_exc(file=sys.stderr)
             logger.error(f"Error processing aging report: {str(e)}")
             return {"error": str(e), "raw_data": report_data}
     

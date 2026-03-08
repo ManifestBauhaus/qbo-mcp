@@ -174,7 +174,7 @@ class QBOService:
             self.qbo = QuickBooks(
                 auth_client=self.auth_client,
                 refresh_token=self.auth_client.refresh_token,
-                realm_id=self.auth_client.realm_id,
+                company_id=self.auth_client.realm_id,
             )
             apply_readonly_guard(self.qbo, self.auth_event_logger)
         except Exception as e:
