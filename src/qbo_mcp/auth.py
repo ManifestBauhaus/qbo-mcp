@@ -126,14 +126,29 @@ class QBOService:
         """
         Ensure valid authentication by refreshing tokens if necessary.
 
-        Attempts to refresh the access token using the refresh token. Saves new tokens to disk if successful.
-        Raises an error if no refresh token is available or if the refresh fails.
+        Re-reads tokens from disk before refreshing to avoid race conditions
+        with the auto-refresh script (which runs every 6h via launchd).
+        Saves new tokens to disk if successful.
 
         Returns:
             bool: True if tokens were refreshed successfully.
         """
         if not self.auth_client:
             raise ValueError("Auth client not initialized!")
+
+        # Re-read tokens from disk to get the latest refresh token.
+        # The auto-refresh script (launchd, every 6h) may have rotated
+        # the refresh token since we last loaded. Using a stale refresh
+        # token causes invalid_grant errors.
+        try:
+            fresh_tokens = self._token_backend.load()
+            if fresh_tokens.get("refresh_token"):
+                self.auth_client.refresh_token = fresh_tokens["refresh_token"]
+                if fresh_tokens.get("access_token"):
+                    self.auth_client.access_token = fresh_tokens["access_token"]
+        except Exception as e:
+            logger.warning(f"Could not re-read tokens from backend: {e}")
+
         if not self.auth_client.access_token or not self.auth_client.refresh_token:
             raise ValueError("No valid access or refresh token found!")
         try:
