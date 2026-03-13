@@ -128,14 +128,24 @@ def refresh_token(refresh_tok: str, retries: int = 3) -> dict | None:
     return None
 
 
+GCLOUD_PATH = "/Users/ericcuevas/google-cloud-sdk/bin/gcloud"
+
+
 def save_to_gcp(secret_name: str, tokens: dict) -> bool:
-    """Save tokens to GCP Secret Manager."""
-    result = subprocess.run(
-        ["gcloud", "secrets", "versions", "add", secret_name,
-         f"--project={PROJECT_ID}", "--data-file=-"],
-        input=json.dumps(tokens), capture_output=True, text=True, timeout=30,
-    )
-    return result.returncode == 0
+    """Save tokens to GCP Secret Manager. Non-fatal — local save is primary."""
+    try:
+        result = subprocess.run(
+            [GCLOUD_PATH, "secrets", "versions", "add", secret_name,
+             f"--project={PROJECT_ID}", "--data-file=-"],
+            input=json.dumps(tokens), capture_output=True, text=True, timeout=30,
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        log.warning(f"  gcloud not found at {GCLOUD_PATH} — skipping GCP save")
+        return False
+    except Exception as e:
+        log.warning(f"  GCP save error: {e} — skipping")
+        return False
 
 
 def send_chat_alert(message: str):
