@@ -41,6 +41,21 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+# --- Sentry instrumentation (GOLEM #4) ---
+try:
+    import sys as _sys, os as _os
+    _bos = _os.path.expanduser('~/bauhaus-os')
+    if _bos not in _sys.path:
+        _sys.path.insert(0, _bos)
+    from src.shared.sentry_init import instrumented
+except Exception:  # noqa: BLE001 — degrade to no-op
+    def instrumented(_label):  # type: ignore[misc]
+        def _decorator(fn):
+            return fn
+        return _decorator
+# --- end Sentry instrumentation ---
+
+
 LOG_DIR = Path("/Users/ericcuevas/qbo-mcp/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -230,6 +245,7 @@ def check_status():
             print(f"  ERROR: Cannot read file — {e}")
 
 
+@instrumented("com.bauhaus.qbo-token-refresh")
 def main():
     parser = argparse.ArgumentParser(description="QBO token auto-refresh (every 6h)")
     parser.add_argument("--dry-run", action="store_true", help="Check without saving")
