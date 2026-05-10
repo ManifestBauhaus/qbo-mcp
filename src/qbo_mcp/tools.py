@@ -174,9 +174,14 @@ def _generate_cash_flow_report(start_date: str | None, end_date: str | None) -> 
 
 def _generate_ar_aging_report(as_of_date: str | None) -> dict[str, Any]:
     _ensure_authenticated_and_handle_errors()
+    # Default to today BEFORE validation — schema requires a non-null string,
+    # but the tool exposes as_of_date as Optional. Without this, callers that
+    # omit the arg hit AgingRequest validation error. Same pattern in AP below.
+    if not as_of_date:
+        as_of_date = date.today().isoformat()
     input_dict = {"as_of_date": as_of_date}
     validate_json_schema(input_dict, AGING_REQUEST_SCHEMA, name="AgingRequest")
-    as_of_date_dt = parse_date(as_of_date) if as_of_date else date.today()
+    as_of_date_dt = parse_date(as_of_date)
     report = reports_generator.get_accounts_receivable_aging(as_of_date_dt)
     return {
         "status": "success",
@@ -188,9 +193,11 @@ def _generate_ar_aging_report(as_of_date: str | None) -> dict[str, Any]:
 
 def _generate_ap_aging_report(as_of_date: str | None) -> dict[str, Any]:
     _ensure_authenticated_and_handle_errors()
+    if not as_of_date:
+        as_of_date = date.today().isoformat()
     input_dict = {"as_of_date": as_of_date}
     validate_json_schema(input_dict, AGING_REQUEST_SCHEMA, name="AgingRequest")
-    as_of_date_dt = parse_date(as_of_date) if as_of_date else date.today()
+    as_of_date_dt = parse_date(as_of_date)
     report = reports_generator.get_accounts_payable_aging(as_of_date_dt)
     return {
         "status": "success",
