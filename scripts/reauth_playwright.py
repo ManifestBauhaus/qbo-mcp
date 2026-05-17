@@ -45,7 +45,11 @@ REDIRECT_URI = "https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl"
 INSTANCES = [
     {
         "key": "ecre",
-        "name": "EC Real Estate Enterprise",
+        # Renamed by Kem 2026-05-17 to the DBA: ECRE → Bauhaus Property Management.
+        # The realm_id and book remain the same; only the display name shown on
+        # Intuit's company-picker page changed. Without this update Playwright
+        # couldn't find the company to click Connect on (re-auth failed twice).
+        "name": "Bauhaus Property Management",
         "realm_id": "1321803265",
         "divisions": "GRIP, ENGINE, MARKET",
         "token_file": Path("/Users/ericcuevas/qbo-mcp/tokens/ecre.json"),
