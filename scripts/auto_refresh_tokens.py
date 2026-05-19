@@ -334,7 +334,8 @@ def main():
         if failed:
             log.error(f"  FAILED: {', '.join(f.upper() for f in failed)}")
             if not args.dry_run:
-                send_gmail_alert(failed)
+                # Email channel disabled per Eric 2026-05-19 — Chat-only.
+                # send_gmail_alert(failed)
                 send_chat_alert(
                     f"*QBO Token Refresh Failed*\n"
                     f"Books: {', '.join(f.upper() for f in failed)}\n"
