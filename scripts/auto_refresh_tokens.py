@@ -41,6 +41,21 @@ import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
+# --- Sentry instrumentation (GOLEM #4) ---
+try:
+    import sys as _sys, os as _os
+    _bos = _os.path.expanduser('~/bauhaus-os')
+    if _bos not in _sys.path:
+        _sys.path.insert(0, _bos)
+    from src.shared.sentry_init import instrumented
+except Exception:  # noqa: BLE001 — degrade to no-op
+    def instrumented(_label):  # type: ignore[misc]
+        def _decorator(fn):
+            return fn
+        return _decorator
+# --- end Sentry instrumentation ---
+
+
 LOG_DIR = Path("/Users/ericcuevas/qbo-mcp/logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -129,23 +144,70 @@ def refresh_token(refresh_tok: str, retries: int = 3) -> dict | None:
 
 
 GCLOUD_PATH = "/Users/ericcuevas/google-cloud-sdk/bin/gcloud"
+# Explicit credentials — never depend on gcloud's ambient active account.
+# Sibling sessions flip `gcloud config set account` (2026-07-06..14 outage:
+# firebase SA became active, lacked secretmanager.versions.add, GCP copies
+# went stale, Cloud Run dashboard read dead tokens → "all books offline").
+GCP_SA_KEY = "/Users/ericcuevas/bauhaus-os/config/service-account.json"
+GCLOUD_ACCOUNT = "eric@bauhaus.la"
 
 
-def save_to_gcp(secret_name: str, tokens: dict) -> bool:
-    """Save tokens to GCP Secret Manager. Non-fatal — local save is primary."""
+def _save_to_gcp_client(secret_name: str, payload: str) -> tuple[bool, str]:
+    """Primary path: Secret Manager Python client with explicit SA key creds.
+
+    Immune to gcloud account flips and user-token reauth expiry. Requires the
+    SA to hold roles/secretmanager.secretVersionAdder on the qbo-tokens-*
+    secrets.
+    """
+    try:
+        from google.cloud import secretmanager
+        from google.oauth2 import service_account
+    except ImportError as e:
+        return False, f"client library unavailable: {e}"
+    try:
+        creds = service_account.Credentials.from_service_account_file(GCP_SA_KEY)
+        client = secretmanager.SecretManagerServiceClient(credentials=creds)
+        client.add_secret_version(request={
+            "parent": f"projects/{PROJECT_ID}/secrets/{secret_name}",
+            "payload": {"data": payload.encode("utf-8")},
+        })
+        return True, ""
+    except Exception as e:
+        return False, str(e).split("\n")[0][:200]
+
+
+def _save_to_gcp_gcloud(secret_name: str, payload: str) -> tuple[bool, str]:
+    """Fallback path: gcloud CLI pinned to the named user account."""
     try:
         result = subprocess.run(
             [GCLOUD_PATH, "secrets", "versions", "add", secret_name,
-             f"--project={PROJECT_ID}", "--data-file=-"],
-            input=json.dumps(tokens), capture_output=True, text=True, timeout=30,
+             f"--project={PROJECT_ID}", f"--account={GCLOUD_ACCOUNT}",
+             "--data-file=-"],
+            input=payload, capture_output=True, text=True, timeout=30,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr or "").strip().split("\n")[0][:200]
     except FileNotFoundError:
-        log.warning(f"  gcloud not found at {GCLOUD_PATH} — skipping GCP save")
-        return False
+        return False, f"gcloud not found at {GCLOUD_PATH}"
     except Exception as e:
-        log.warning(f"  GCP save error: {e} — skipping")
-        return False
+        return False, str(e)[:200]
+
+
+def save_to_gcp(secret_name: str, tokens: dict) -> bool:
+    """Save tokens to GCP Secret Manager. Non-fatal — local save is primary,
+    but Cloud Run (sovereign dashboard) reads ONLY the GCP copy, so a silent
+    stale secret takes the dashboard's books offline. Always log WHY a save
+    failed."""
+    payload = json.dumps(tokens)
+    ok, err_client = _save_to_gcp_client(secret_name, payload)
+    if ok:
+        return True
+    ok, err_gcloud = _save_to_gcp_gcloud(secret_name, payload)
+    if ok:
+        return True
+    log.warning(f"  GCP save failed — client: {err_client} | gcloud: {err_gcloud}")
+    return False
 
 
 def send_chat_alert(message: str):
@@ -230,6 +292,7 @@ def check_status():
             print(f"  ERROR: Cannot read file — {e}")
 
 
+@instrumented("com.bauhaus.qbo-token-refresh")
 def main():
     parser = argparse.ArgumentParser(description="QBO token auto-refresh (every 6h)")
     parser.add_argument("--dry-run", action="store_true", help="Check without saving")
@@ -293,10 +356,15 @@ def main():
                 "realm_id": realm_id,
             }
 
-            # Save local (atomic write via temp file)
+            # Save local (atomic write via temp file). fsync before rename:
+            # Intuit invalidates the old refresh token the moment the new one
+            # is issued, so losing this write to a crash/power cut = full
+            # browser re-auth for the book. Shrink that window to ~zero.
             tmp_file = inst["local"].with_suffix(".tmp")
             with open(tmp_file, "w") as f:
                 json.dump(new_tokens, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
             tmp_file.replace(inst["local"])
             log.info(f"  Saved to {inst['local']}")
 
@@ -318,7 +386,8 @@ def main():
         if failed:
             log.error(f"  FAILED: {', '.join(f.upper() for f in failed)}")
             if not args.dry_run:
-                send_gmail_alert(failed)
+                # Email channel disabled per Eric 2026-05-19 — Chat-only.
+                # send_gmail_alert(failed)
                 send_chat_alert(
                     f"*QBO Token Refresh Failed*\n"
                     f"Books: {', '.join(f.upper() for f in failed)}\n"

@@ -45,7 +45,13 @@ REDIRECT_URI = "https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl"
 INSTANCES = [
     {
         "key": "ecre",
-        "name": "EC Real Estate Enterprise",
+        # Renamed by Kem: ECRE → "Bauhaus Property Management" (2026-05-17) →
+        # "Bauhaus Group" (current, confirmed live via CompanyInfo 2026-07-19).
+        # Legal name is still EC REAL ESTATE ENTERPRISE, INC.; realm_id and book
+        # are unchanged — only the display name on Intuit's company-picker page
+        # changed. Keep this in sync with the live CompanyName so Playwright can
+        # find the right company to click Connect on (a stale name failed twice).
+        "name": "Bauhaus Group",
         "realm_id": "1321803265",
         "divisions": "GRIP, ENGINE, MARKET",
         "token_file": Path("/Users/ericcuevas/qbo-mcp/tokens/ecre.json"),
