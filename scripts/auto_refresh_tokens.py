@@ -171,9 +171,32 @@ def _save_to_gcp_client(secret_name: str, payload: str) -> tuple[bool, str]:
             "parent": f"projects/{PROJECT_ID}/secrets/{secret_name}",
             "payload": {"data": payload.encode("utf-8")},
         })
-        return True, ""
     except Exception as e:
         return False, str(e).split("\n")[0][:200]
+    _prune_old_versions(client, f"projects/{PROJECT_ID}/secrets/{secret_name}")
+    return True, ""
+
+
+def _prune_old_versions(client, secret_path: str) -> None:
+    """Keep only the newest 2 versions after a save (old versions are billed monthly — $266 in Sep 2026).
+
+    The helper is loaded by FILE PATH, not `import qbo_mcp`: the package __init__ imports the MCP server,
+    which this launchd python may not have. A prune failure is logged and never affects the save.
+    """
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "qbo_token_backends", Path(__file__).resolve().parents[1] / "src" / "qbo_mcp" / "token_backends.py")
+        tb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tb)
+        destroyed, err = tb.prune_old_versions(client, secret_path)
+    except Exception as e:  # noqa: BLE001 — never let housekeeping break a token save
+        log.warning(f"  old-version prune skipped for {secret_path.rsplit('/', 1)[1]}: {str(e)[:200]}")
+        return
+    if err:
+        log.warning(f"  old-version prune for {secret_path.rsplit('/', 1)[1]}: {err} (destroyed {destroyed})")
+    elif destroyed:
+        log.info(f"  pruned {destroyed} old version(s) of {secret_path.rsplit('/', 1)[1]}")
 
 
 def _save_to_gcp_gcloud(secret_name: str, payload: str) -> tuple[bool, str]:

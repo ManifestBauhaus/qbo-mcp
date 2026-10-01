@@ -63,6 +63,42 @@ class LocalTokenBackend(TokenBackend):
             logger.info(f"Deleted token file {self.token_file}")
 
 
+PRUNE_KEEP = 2          # the version just written + the one before it (rollback)
+PRUNE_MAX_PER_CALL = 200
+PRUNE_MAX_INTERACTIVE = 10
+
+
+def prune_old_versions(client, secret_path: str, keep: int = PRUNE_KEEP,
+                       max_destroy: int = PRUNE_MAX_PER_CALL) -> tuple[int, str]:
+    """Destroy every version of `secret_path` except the newest `keep`.
+
+    Why: every token save adds a version and Secret Manager bills each live version monthly. Three QBO
+    secrets refreshed every 6 h had piled up ~4,400 versions — the bill went $19 (May 2026) → $266 (Sep 2026).
+    Newest is decided by version NUMBER (monotonic), never by list order. Capped per call (oldest first) so a
+    backlog clears over a few runs instead of stalling one. Never raises: a failed prune must not fail a save.
+    Returns (destroyed, error) — error is "" on success.
+    """
+    if keep < 1:
+        raise ValueError("keep must be >= 1: the newest version is never destroyed")
+    try:
+        versions = list(client.list_secret_versions(
+            request={"parent": secret_path, "filter": "state:(ENABLED OR DISABLED)"}))
+    except Exception as e:  # noqa: BLE001 — permission or network: report, don't raise
+        return 0, f"list failed: {str(e).splitlines()[0][:200]}"
+    versions.sort(key=lambda v: int(v.name.rsplit("/", 1)[1]), reverse=True)
+    # Oldest first (data-trio 2026-10-01): a capped pass clears the ancient backlog and leaves the most
+    # recent extra versions for last, so recent fallbacks survive longest while the backlog drains.
+    doomed = list(reversed(versions[keep:]))[:max_destroy]
+    destroyed = 0
+    for v in doomed:
+        try:
+            client.destroy_secret_version(request={"name": v.name})
+            destroyed += 1
+        except Exception as e:  # noqa: BLE001 — first failure (usually permission) stops the pass
+            return destroyed, f"destroy failed at {v.name.rsplit('/', 1)[1]}: {str(e).splitlines()[0][:200]}"
+    return destroyed, ""
+
+
 class GCPTokenBackend(TokenBackend):
     """Store tokens in GCP Secret Manager."""
 
@@ -117,6 +153,13 @@ class GCPTokenBackend(TokenBackend):
                 }
             )
             logger.info(f"Created and saved GCP secret {self._secret_id}")
+        # Interactive path (the MCP refreshing mid-call): keep it fast — at most a few deletes per save.
+        # The 6-hourly launchd refresh clears any backlog with the full per-call cap (data-trio 2026-10-01).
+        destroyed, err = prune_old_versions(self._client, self._secret_path, max_destroy=PRUNE_MAX_INTERACTIVE)
+        if err:
+            logger.warning(f"Old-version prune for {self._secret_id}: {err} (destroyed {destroyed})")
+        elif destroyed:
+            logger.info(f"Pruned {destroyed} old version(s) of {self._secret_id}")
 
     def delete(self) -> None:
         from google.api_core.exceptions import NotFound
